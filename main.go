@@ -98,7 +98,6 @@ func scanFolder(ctx context.Context) {
 			// Check for cancellation before processing each entry
 			select {
 			case <-ctx.Done():
-				slog.InfoContext(ctx, "Scan cancelled during directory iteration.")
 				return
 			default:
 			}
@@ -107,7 +106,7 @@ func scanFolder(ctx context.Context) {
 
 			if start.Add(scanInterval).Before(now) {
 				slog.WarnContext(ctx, "Scan interval exceeded, stopping scan", "interval", scanInterval)
-				return // Exit if the scan interval has been exceeded
+				return
 			}
 
 			if entry.IsDir() {
@@ -132,20 +131,27 @@ func scanFolder(ctx context.Context) {
 			}
 
 			if previous.lastSeen.Add(stableInterval).After(now) {
-				slog.InfoContext(ctx, "File is stable but too fresh for processing", "path", path, "size", size, "lastSeen", previous.lastSeen, "stableInterval", stableInterval)
 				continue
 			}
 
-			// Simulate processing time - replace with actual processing
-			time.Sleep(1 * time.Second)
+			if err := process(path); err != nil {
+				slog.ErrorContext(ctx, "Failed to process file", "path", path, "error", err)
+				continue
+			}
+
 			if err := os.Remove(path); err != nil {
 				slog.ErrorContext(ctx, "Failed to remove file after processing", "path", path, "error", err)
 				continue
 			}
-			
+
 			delete(monitoredFiles, path)
 
 			slog.InfoContext(ctx, "File processed and removed", "path", path, "size", size)
 		}
 	}
+}
+
+func process(_ string) error {
+	time.Sleep(1 * time.Second)
+	return nil
 }
