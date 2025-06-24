@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -25,9 +24,6 @@ type fileInfo struct {
 	size     int64
 	lastSeen time.Time
 }
-
-// monitoredFiles keeps track of files and their stability
-var monitoredFiles = make(map[string]fileInfo)
 
 func main() {
 	// Setup slog
@@ -57,101 +53,91 @@ func main() {
 
 	slog.InfoContext(ctx, "Watcher started. Press Ctrl+C to exit.")
 
+	m := monitor{}
+
 Loop: // Label for breaking out of the loop
 	for {
-		scanFolder(ctx) // Scan the folder for changes
-
 		select {
 		case <-time.After(scanInterval):
 			// Continue to next scan
 		case <-ctx.Done():
 			break Loop
 		}
+
+		if err := fs.WalkDir(&myfs{}, watchFolder, m.monitor); err != nil {
+			slog.ErrorContext(ctx, "Error processing files", "folder", watchFolder, "error", err)
+			continue
+		}
 	}
+
 	slog.InfoContext(ctx, "Folder watcher stopped.")
 }
 
-func scanFolder(ctx context.Context) {
-	start := time.Now()
+type myfs struct {
+}
 
-	// Open the directory to use its ReadDir method
-	dir, err := os.Open(watchFolder)
+// ReadDir implements fs.ReadDirFS.
+func (m *myfs) ReadDir(name string) ([]fs.DirEntry, error) {
+	dir, err := os.Open(name)
 	if err != nil {
-		slog.WarnContext(ctx, "Error opening directory", "folder", watchFolder, "error", err)
-		return
+		return nil, err
 	}
 	defer dir.Close()
 
-	// Loop to read directory entries in batches of 10
-	for {
-		dirEntries, err := dir.ReadDir(10) // Read up to 10 entries in a batch
-		switch {
-		case errors.Is(err, io.EOF):
-			return
-		case !errors.Is(err, nil):
-			slog.WarnContext(ctx, "Error reading directory batch with File.ReadDir method", "folder", watchFolder, "error", err)
-			return
-		}
-
-		// Process the current batch of entries
-		for _, entry := range dirEntries { // entry is now os.DirEntry
-			// Check for cancellation before processing each entry
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			now := time.Now()
-
-			if start.Add(scanInterval).Before(now) {
-				slog.WarnContext(ctx, "Scan interval exceeded, stopping scan", "interval", scanInterval)
-				return
-			}
-
-			if entry.IsDir() {
-				continue
-			}
-
-			path := filepath.Join(watchFolder, entry.Name())
-			stat, err := entry.Info()
-			if err != nil {
-				slog.WarnContext(ctx, "Error getting info for file entry", "path", path, "error", err)
-				continue
-			}
-
-			size := stat.Size()
-			previous, exists := monitoredFiles[path]
-			if !exists || size != previous.size {
-				monitoredFiles[path] = fileInfo{
-					size:     size,
-					lastSeen: now,
-				}
-				continue // new file or size changed, continue to next entry
-			}
-
-			if previous.lastSeen.Add(stableInterval).After(now) {
-				continue
-			}
-
-			if err := process(path); err != nil {
-				slog.ErrorContext(ctx, "Failed to process file", "path", path, "error", err)
-				continue
-			}
-
-			if err := os.Remove(path); err != nil {
-				slog.ErrorContext(ctx, "Failed to remove file after processing", "path", path, "error", err)
-				continue
-			}
-
-			delete(monitoredFiles, path)
-
-			slog.InfoContext(ctx, "File processed and removed", "path", path, "size", size)
-		}
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return nil, err
 	}
+
+	return entries, nil
 }
 
-func process(_ string) error {
-	time.Sleep(1 * time.Second)
+// Open implements fs.FS.
+func (m *myfs) Open(name string) (fs.File, error) {
+	return os.Open(name)
+}
+
+var _ fs.FS = (*myfs)(nil)
+var _ fs.ReadDirFS = (*myfs)(nil)
+
+type monitor struct {
+	// monitoredFiles keeps track of files and their stability
+	monitored map[string]fileInfo
+}
+
+func (m *monitor) monitor(path string, d fs.DirEntry, err error) error {
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+
+	info, err := d.Info()
+	if err != nil {
+		return err
+	}
+
+	size := info.Size()
+	previous, exists := m.monitored[path]
+	if !exists || size != previous.size {
+		m.monitored[path] = fileInfo{
+			size:     size,
+			lastSeen: now,
+		}
+		return nil
+	}
+
+	if previous.lastSeen.Add(stableInterval).After(now) {
+		return nil
+	}
+
+	time.Sleep(1 * time.Second) // Simulate processing delay
+
+	if err := os.Remove(path); err != nil {
+		return nil
+	}
+
+	delete(m.monitored, path)
+
 	return nil
 }
