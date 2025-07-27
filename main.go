@@ -53,7 +53,7 @@ func main() {
 
 	slog.InfoContext(ctx, "Watcher started. Press Ctrl+C to exit.")
 
-	m := monitor{}
+	m := monitor{monitored: map[string]fileInfo{}}
 
 Loop: // Label for breaking out of the loop
 	for {
@@ -115,6 +115,10 @@ func (m *monitor) monitor(path string, d fs.DirEntry, err error) error {
 	info, err := d.Info()
 	if err != nil {
 		return err
+	}
+
+	if d.IsDir() {
+		return nil
 	}
 
 	size := info.Size()
